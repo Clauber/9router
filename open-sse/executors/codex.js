@@ -285,6 +285,20 @@ export class CodexExecutor extends BaseExecutor {
     while (true) {
       const result = await super.execute(args);
       const peek = await this._peekSseTransientError(result.response);
+      // A provider can accept the request (HTTP 200) and then reset the SSE
+      // socket before emitting any event. Treat that as a transient transport
+      // failure so the request gets the same short retry window as Codex CLI.
+      // Once output has started, retrying could duplicate text or tool calls.
+      if (peek.transportError && !peek.hasOutput) {
+        if (attempt >= attempts) {
+          args.log?.warn?.("RETRY", `CODEX | SSE transport failed before output — retries exhausted (${attempt}/${attempts})`);
+          throw peek.transportError;
+        }
+        attempt++;
+        args.log?.debug?.("RETRY", `CODEX | SSE transport failed before output — retry ${attempt}/${attempts} after ${delayMs / 1000}s`);
+        await new Promise(r => setTimeout(r, delayMs));
+        continue;
+      }
       if (!peek.matched) {
         // Replace body with re-assembled stream (prefix bytes already read + rest)
         if (peek.replacementBody) {
@@ -317,13 +331,14 @@ export class CodexExecutor extends BaseExecutor {
   // Returns { matched: string|null, message: string|null, accountFallback: boolean, replacementBody: ReadableStream|null }.
   // Caller must use replacementBody when no error matched (original body has been read).
   async _peekSseTransientError(response) {
-    if (!response || !response.ok || !response.body) return { matched: null, message: null, accountFallback: false, replacementBody: null };
+    if (!response || !response.ok || !response.body) return { matched: null, message: null, accountFallback: false, replacementBody: null, transportError: null, hasOutput: false };
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     const chunks = [];
     let text = "";
     let matched = null;
     let accountFallback = false;
+    let transportError = null;
     try {
       while (text.length < CODEX_SSE_PEEK_BYTES) {
         const { done, value } = await reader.read();
@@ -339,12 +354,13 @@ export class CodexExecutor extends BaseExecutor {
       }
     } catch (e) {
       dbg("CODEX", `peek read error: ${e.message}`);
+      transportError = e;
     }
 
     if (matched) {
       try { await reader.cancel(); } catch { /* noop */ }
       try { reader.releaseLock(); } catch { /* noop */ }
-      return { matched, message: extractSseErrorMessage(text, matched), accountFallback, replacementBody: null };
+      return { matched, message: extractSseErrorMessage(text, matched), accountFallback, replacementBody: null, transportError: null, hasOutput: CODEX_SSE_USER_OUTPUT_PATTERNS.some(p => text.toLowerCase().includes(p)) };
     }
 
     reader.releaseLock();
@@ -368,7 +384,7 @@ export class CodexExecutor extends BaseExecutor {
         try { upstreamReader?.cancel(reason); } catch { /* noop */ }
       },
     });
-    return { matched: null, message: null, accountFallback: false, replacementBody };
+    return { matched: null, message: null, accountFallback: false, replacementBody, transportError, hasOutput: CODEX_SSE_USER_OUTPUT_PATTERNS.some(p => text.toLowerCase().includes(p)) };
   }
 
   // Parse Codex usage_limit_reached to extract precise resetsAtMs; fallback to default otherwise

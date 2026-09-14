@@ -68,6 +68,18 @@ describe("Codex fast tier and capacity handling", () => {
     expect(peek.matched).toBeNull();
     await expect(new Response(peek.replacementBody).text()).resolves.toBe(text);
   });
+
+  it("reports a transport failure before the first output event as retryable", async () => {
+    const executor = new CodexExecutor();
+    const error = new Error("socket hang up");
+    const response = new Response(new ReadableStream({
+      start(controller) { controller.error(error); },
+    }), { status: 200, headers: { "Content-Type": "text/event-stream" } });
+
+    const peek = await executor._peekSseTransientError(response);
+    expect(peek.transportError).toBe(error);
+    expect(peek.hasOutput).toBe(false);
+  });
 });
 
 describe("Codex reasoning normalization", () => {
