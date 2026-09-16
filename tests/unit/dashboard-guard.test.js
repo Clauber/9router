@@ -287,6 +287,37 @@ describe("dashboard guard local-only access", () => {
   });
 });
 
+describe("Headroom dashboard proxy access", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.NINEROUTER_PEER_TOKEN = PEER_TOKEN;
+    mocks.getSettings.mockResolvedValue({ requireLogin: true });
+    mocks.getConsistentMachineId.mockResolvedValue("cli-token");
+    mocks.verifyDashboardAuthToken.mockResolvedValue(false);
+  });
+
+  it("allows an authenticated dashboard session to view Headroom remotely", async () => {
+    mocks.verifyDashboardAuthToken.mockResolvedValue(true);
+    const authenticatedRequest = request("/api/headroom/proxy/dashboard", {
+      host: "router.example.com",
+    });
+    authenticatedRequest.cookies.get.mockReturnValue({ value: "dashboard-token" });
+
+    const response = await proxy(authenticatedRequest);
+
+    expect(response).toBe(mocks.nextResponse);
+  });
+
+  it("rejects an unauthenticated remote Headroom dashboard request", async () => {
+    const response = await proxy(request("/api/headroom/proxy/dashboard", {
+      host: "router.example.com",
+    }));
+
+    expect(response.status).toBe(401);
+    expect(response.body.error).toBe("Unauthorized");
+  });
+});
+
 describe("dashboard guard helpers", () => {
   it("extracts bearer API keys before x-api-key", () => {
     const apiRequest = request("/v1/chat/completions", {
